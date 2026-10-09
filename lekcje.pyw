@@ -72,9 +72,11 @@ DEFAULT_CONFIG = {
     "pos_y": None,
     "transparent_bg": False,
     "shadow": True,
-    "outline_auto": True,  # kolor obrysu dobierany automatycznie (kontrast)
     "outline_color": "#000000",
     "outline_alpha": 100,  # 0-100 %
+    "warn_minutes": 5,  # poniżej tylu minut do końca lekcji zmiana koloru (0 = wył.)
+    "warn_color": "#ff3b30",
+    "show_end_label": True,  # napis "Do końca:" przed czasem
     "click_through": False,
     "hide_missing_dialog": False,
 }
@@ -98,7 +100,7 @@ def load_config():
             if isinstance(data.get(key), int):
                 config[key] = data[key]
         for key in ("transparent_bg", "shadow", "click_through",
-                    "hide_missing_dialog", "outline_auto"):
+                    "hide_missing_dialog", "show_end_label"):
             if isinstance(data.get(key), bool):
                 config[key] = data[key]
         if isinstance(data.get("outline_color"), str):
@@ -106,6 +108,11 @@ def load_config():
         alpha = data.get("outline_alpha")
         if isinstance(alpha, int) and 0 <= alpha <= 100:
             config["outline_alpha"] = alpha
+        if isinstance(data.get("warn_color"), str):
+            config["warn_color"] = data["warn_color"]
+        warn = data.get("warn_minutes")
+        if isinstance(warn, int) and 0 <= warn <= 30:
+            config["warn_minutes"] = warn
     except (OSError, ValueError):
         pass
     return config
@@ -142,10 +149,11 @@ LESSONS = [
 
 
 def compute_text():
+    """Zwraca (tekst, sekundy do końca lekcji albo None poza lekcją)."""
     now = datetime.datetime.now()
 
     if now.weekday() >= 5:
-        return "Weekend – brak lekcji"
+        return "Weekend – brak lekcji", None
 
     for start_str, end_str, num in LESSONS:
         sh, sm = map(int, start_str.split(":"))
@@ -157,13 +165,14 @@ def compute_text():
         if start_dt <= now < end_dt:
             diff = int((end_dt - now).total_seconds())
             m, s = divmod(diff, 60)
-            return f"Do końca: {m:02d}:{s:02d}"
+            label = "Do końca: " if config["show_end_label"] else ""
+            return f"{label}{m:02d}:{s:02d}", diff
         elif now < start_dt:
             diff = int((start_dt - now).total_seconds())
             m, s = divmod(diff, 60)
-            return f"Do dzwonka: {m:02d}:{s:02d}"
+            return f"Do dzwonka: {m:02d}:{s:02d}", None
 
-    return "Lekcje na dziś zakończone"
+    return "Lekcje na dziś zakończone", None
 
 
 # ---------------------------------------------------------------------------
@@ -196,19 +205,25 @@ canvas = tk.Canvas(root, highlightthickness=0, borderwidth=0, cursor="fleur")
 canvas.pack()
 
 current_text = "Ładowanie..."
+current_remaining = None  # sekundy do końca lekcji (None = poza lekcją)
 
 
-def shadow_color_for(color):
-    """Cień w kolorze kontrastującym z kolorem tekstu."""
-    r, g, b = root.winfo_rgb(color)
-    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 65535
-    return "#000000" if luminance > 0.5 else "#ffffff"
+def refresh_text():
+    global current_text, current_remaining
+    current_text, current_remaining = compute_text()
+
+
+def is_warning():
+    return (current_remaining is not None and config["warn_minutes"] > 0
+            and current_remaining < config["warn_minutes"] * 60)
+
+
+def current_text_color():
+    return config["warn_color"] if is_warning() else config["text_color"]
 
 
 def outline_base_color():
-    """Kolor obrysu przed uwzględnieniem krycia."""
-    if config["outline_auto"]:
-        return shadow_color_for(config["text_color"])
+    """Kolor obrysu przed uwzględnieniem krycia (stały, ustawiany w opcjach)."""
     return config["outline_color"]
 
 
@@ -249,7 +264,7 @@ def render():
             canvas.create_text(x + dx, y + dy, text=current_text, font=text_font,
                                fill=sc, anchor="nw")
     canvas.create_text(x, y, text=current_text, font=text_font,
-                       fill=config["text_color"], anchor="nw")
+                       fill=current_text_color(), anchor="nw")
 
 
 def apply_style():
@@ -271,15 +286,16 @@ def apply_style():
             pass
     root.configure(bg=bg)
     canvas.configure(bg=bg)
+    refresh_text()
     render()
     refresh_tooltip()
 
 
 def update_timer():
-    global current_text
-    text = compute_text()
-    if text != current_text:
-        current_text = text
+    global current_text, current_remaining
+    state = compute_text()
+    if state != (current_text, current_remaining):
+        current_text, current_remaining = state
         render()
     if not IS_WIN:
         # Okna override-redirect na X11 ignorują "-topmost", więc podnosimy je
@@ -382,8 +398,6 @@ def pick_color(key):
         dialog_open = False
     if result and result[1]:
         config[key] = result[1]
-        if key == "outline_color":
-            config["outline_auto"] = False  # wybrano ręcznie
         save_config()
         apply_style()
     schedule_hide()
@@ -405,6 +419,15 @@ def change_outline_alpha(delta):
     if new == config["outline_alpha"]:
         return
     config["outline_alpha"] = new
+    save_config()
+    apply_style()
+
+
+def change_warn_minutes(delta):
+    new = max(0, min(30, config["warn_minutes"] + delta))
+    if new == config["warn_minutes"]:
+        return
+    config["warn_minutes"] = new
     save_config()
     apply_style()
 
@@ -495,7 +518,6 @@ minus_btn.bind("<Button-1>", lambda e: change_size(-1))
 make_toggle_row("Przezroczyste tło" if IS_WIN else "Półprzezroczyste okno",
                 "transparent_bg")
 make_toggle_row("Cień tekstu (przy przezr. tle)", "shadow")
-make_toggle_row("Obrys automatyczny (kontrast)", "outline_auto")
 outline_swatch = make_color_row("Kolor obrysu", "outline_color")
 
 alpha_row = tk.Frame(tooltip, bg=TIP_BG)
@@ -513,6 +535,26 @@ alpha_minus = tk.Label(alpha_row, text=" − ", bg="#3a3a3a", fg=TIP_FG,
 alpha_minus.pack(side="right", padx=(12, 0))
 alpha_plus.bind("<Button-1>", lambda e: change_outline_alpha(10))
 alpha_minus.bind("<Button-1>", lambda e: change_outline_alpha(-10))
+
+warn_swatch = make_color_row("Kolor ostrzeżenia", "warn_color")
+
+warn_row = tk.Frame(tooltip, bg=TIP_BG)
+warn_row.pack(fill="x", padx=8, pady=3)
+tk.Label(warn_row, text="Ostrzeżenie poniżej", bg=TIP_BG, fg=TIP_FG,
+         font=(UI_FONT, 9)).pack(side="left")
+warn_plus = tk.Label(warn_row, text=" + ", bg="#3a3a3a", fg=TIP_FG,
+                     font=(UI_FONT, 9, "bold"), cursor="hand2")
+warn_plus.pack(side="right")
+warn_value = tk.Label(warn_row, text="", bg=TIP_BG, fg=TIP_FG,
+                      font=(UI_FONT, 9), width=6)
+warn_value.pack(side="right")
+warn_minus = tk.Label(warn_row, text=" − ", bg="#3a3a3a", fg=TIP_FG,
+                      font=(UI_FONT, 9, "bold"), cursor="hand2")
+warn_minus.pack(side="right", padx=(12, 0))
+warn_plus.bind("<Button-1>", lambda e: change_warn_minutes(1))
+warn_minus.bind("<Button-1>", lambda e: change_warn_minutes(-1))
+
+make_toggle_row("Napis „Do końca:”", "show_end_label")
 if CLICK_THROUGH_AVAILABLE:
     make_toggle_row("Click-through (opcje w zasobniku)", "click_through")
 
@@ -528,6 +570,9 @@ def refresh_tooltip():
     size_value.config(text=str(config["font_size"]))
     outline_swatch.configure(bg=outline_base_color())
     outline_alpha_value.config(text=f'{config["outline_alpha"]}%')
+    warn_swatch.configure(bg=config["warn_color"])
+    warn_value.config(text=f'{config["warn_minutes"]} min'
+                      if config["warn_minutes"] else "wył.")
     for key, (lbl, text) in toggle_labels.items():
         lbl.config(text=("☑ " if config[key] else "☐ ") + text)
 
@@ -634,10 +679,10 @@ root.protocol("WM_DELETE_WINDOW", quit_app)
 def make_tray_image():
     img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     d = ImageDraw.Draw(img)
-    d.ellipse((4, 4, 60, 60), fill=(30, 30, 30, 255),
-              outline=(0, 255, 204, 255), width=4)
-    d.line((32, 32, 32, 14), fill=(0, 255, 204, 255), width=4)
-    d.line((32, 32, 45, 39), fill=(0, 255, 204, 255), width=4)
+    white = (255, 255, 255, 255)
+    d.ellipse((4, 4, 60, 60), outline=white, width=5)
+    d.line((32, 32, 32, 14), fill=white, width=5)
+    d.line((32, 32, 45, 39), fill=white, width=5)
     return img
 
 
@@ -652,6 +697,9 @@ def start_tray():
         item("Kolor obrysu…", lambda i, it: run_ui(lambda: pick_color("outline_color"))),
         item("Krycie obrysu +", lambda i, it: run_ui(lambda: change_outline_alpha(10))),
         item("Krycie obrysu −", lambda i, it: run_ui(lambda: change_outline_alpha(-10))),
+        item("Kolor ostrzeżenia…", lambda i, it: run_ui(lambda: pick_color("warn_color"))),
+        item("Ostrzeżenie: więcej minut", lambda i, it: run_ui(lambda: change_warn_minutes(1))),
+        item("Ostrzeżenie: mniej minut", lambda i, it: run_ui(lambda: change_warn_minutes(-1))),
         item("Rozmiar +", lambda i, it: run_ui(lambda: change_size(1))),
         item("Rozmiar −", lambda i, it: run_ui(lambda: change_size(-1))),
         pystray.Menu.SEPARATOR,
@@ -659,8 +707,8 @@ def start_tray():
              checked=lambda it: config["transparent_bg"]),
         item("Cień tekstu", lambda i, it: run_ui(lambda: toggle("shadow")),
              checked=lambda it: config["shadow"]),
-        item("Obrys automatyczny", lambda i, it: run_ui(lambda: toggle("outline_auto")),
-             checked=lambda it: config["outline_auto"]),
+        item("Napis „Do końca:”", lambda i, it: run_ui(lambda: toggle("show_end_label")),
+             checked=lambda it: config["show_end_label"]),
         # domyślna akcja = lewy klik na ikonie
         item("Click-through", lambda i, it: run_ui(lambda: toggle("click_through")),
              checked=lambda it: config["click_through"], default=True,
@@ -821,7 +869,7 @@ root.update()
 if config["click_through"]:
     set_click_through(True)
 
-current_text = compute_text()
+refresh_text()
 render()
 poll_queue()
 update_timer()
